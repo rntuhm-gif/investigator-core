@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "investigator-core"
+version = "0.1.0"
+description = "Multi-tool investigation orchestrator for Nmap scanning, traffic/memory forensics, and case management"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "CTF Toolkit Builder", email = "user@example.com"}]
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Environment :: Console",
+]
+dependencies = [
+    "python-nmap>=0.7.0",
+    "colorama>=0.4.6",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+pcap = ["pyshark>=0.6"]
+memory = ["volatility3>=2.5"]
+disk = ["pytsk3>=2022"]
+full = ["pyshark>=0.6", "volatility3>=2.5", "pytsk3>=2022"]
+
+[project.scripts]
+investigator = "investigator.cli:main"
+

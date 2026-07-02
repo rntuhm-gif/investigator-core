@@ -1,0 +1,2 @@
+[console_scripts]
+investigator = investigator.cli:main
