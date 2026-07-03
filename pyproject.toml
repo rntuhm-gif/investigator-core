@@ -4,21 +4,32 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "investigator-core"
-version = "0.1.0"
-description = "Multi-tool investigation orchestrator for Nmap scanning, traffic/memory forensics, and case management"
+version = "0.2.0"
+description = "Multi-tool investigation orchestrator — Nmap/port/HTTP/subdomain scanners, traffic/memory/IOC forensics, workflow pipelines, and case management with report generation"
 readme = "README.md"
 license = {text = "MIT"}
-authors = [{name = "CTF Toolkit Builder", email = "user@example.com"}]
+authors = [{name = "rntuhm-gif", email = "rntuhm@users.noreply.github.com"}]
+maintainers = [{name = "rntuhm-gif", email = "rntuhm@users.noreply.github.com"}]
+keywords = ["security", "pentesting", "ctf", "nmap", "forensics", "recon", "orchestrator", "investigation"]
 requires-python = ">=3.10"
 classifiers = [
-    "Programming Language :: Python :: 3",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Information Technology",
     "Topic :: Security",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "License :: OSI Approved :: MIT License",
 ]
 dependencies = [
     "python-nmap>=0.7.0",
     "colorama>=0.4.6",
     "rich>=13.0.0",
+    "requests>=2.28",
+    "urllib3>=1.26",
 ]
 
 [project.optional-dependencies]
@@ -26,7 +37,27 @@ pcap = ["pyshark>=0.6"]
 memory = ["volatility3>=2.5"]
 disk = ["pytsk3>=2022"]
 full = ["pyshark>=0.6", "volatility3>=2.5", "pytsk3>=2022"]
+dev = ["build>=0.10", "twine>=4.0", "wheel>=0.40", "pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/rntuhm-gif/investigator-core"
+Repository = "https://github.com/rntuhm-gif/investigator-core"
+Issues = "https://github.com/rntuhm-gif/investigator-core/issues"
+Changelog = "https://github.com/rntuhm-gif/investigator-core/blob/master/CHANGELOG.md"
 
 [project.scripts]
 investigator = "investigator.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+zip-safe = false
+platforms = ["linux"]
+
+[tool.setuptools.packages.find]
+include = ["investigator*"]
+exclude = ["tests*", "examples*"]
+
+[tool.setuptools.package-data]
+investigator = ["py.typed"]
+
 

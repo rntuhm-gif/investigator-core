@@ -1,10 +1,9 @@
-from setuptools import setup, find_packages
-setup(
-    name="investigator-core",
-    version="0.1.0",
-    packages=find_packages(),
-    python_requires=">=3.10",
-    include_package_data=True,
-    zip_safe=False,
-)
+"""Setup script for investigator-core.
+
+Modern builds use pyproject.toml. This file is kept for legacy compatibility
+and to support editable installs on older pip versions.
+"""
+from setuptools import setup
+
+setup()
 
