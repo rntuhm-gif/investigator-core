@@ -1,25 +1,34 @@
 """investigator CLI — main entry point."""
 import argparse
 import json
+import os
 import sys
+import urllib3
 from . import __version__
 from .config import Config
 from .case_manager import CaseManager
-from .scanners import NmapScanner
-from .analyzers import PcapAnalyzer, VolatilityAnalyzer
+from .scanners import NmapScanner, PortScanner, HttpScanner, SubdomainEnumerator
+from .analyzers import PcapAnalyzer, VolatilityAnalyzer, IOCHarvester
 from .reports import ReportGenerator, EvidenceLocker
+from .orchestrator import Workflow, WorkflowRunner
 from .utils.color_out import cprint
+
+# Quiet SSL warnings globally (intentional, for CTF/lab work)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def build_parser():
     p = argparse.ArgumentParser(
         prog="investigator",
-        description="Multi-tool investigation orchestrator — Nmap, PCAP/memory forensics, case management",
+        description="Multi-tool investigation orchestrator — scans, forensics, workflows, case management",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--version", action="version", version=f"investigator {__version__}")
     p.add_argument("--verbose", "-v", action="store_true")
     sub = p.add_subparsers(dest="command", required=True)
+
+    # dashboard
+    sub.add_parser("dashboard", help="Launch interactive dashboard")
 
     # case
     cp = sub.add_parser("case")
@@ -33,7 +42,7 @@ def build_parser():
     cs.add_parser("reopen").add_argument("name")
     cs.add_parser("delete").add_argument("name")
 
-    # scan
+    # scan (default = nmap)
     sp = sub.add_parser("scan")
     sp.add_argument("target")
     sp.add_argument("-n", "--case", default="")
@@ -42,6 +51,31 @@ def build_parser():
     sp.add_argument("--sudo", action="store_true")
     sp.add_argument("--timeout", type=int, default=300)
     sp.add_argument("-o", "--output", default="")
+
+    # portscan
+    pp = sub.add_parser("portscan")
+    pp.add_argument("target")
+    pp.add_argument("-p", "--ports", default="1-1024")
+    pp.add_argument("-t", "--threads", type=int, default=100)
+    pp.add_argument("--timeout", type=float, default=1.0)
+    pp.add_argument("--banner", action="store_true")
+    pp.add_argument("-n", "--case", default="")
+    pp.add_argument("-o", "--output", default="")
+
+    # http
+    hp = sub.add_parser("http")
+    hp.add_argument("target")
+    hp.add_argument("-n", "--case", default="")
+    hp.add_argument("-o", "--output", default="")
+
+    # subdomain
+    sb = sub.add_parser("subdomain")
+    sb.add_argument("target")
+    sb.add_argument("-n", "--case", default="")
+    sb.add_argument("-t", "--threads", type=int, default=50)
+    sb.add_argument("--no-crtsh", action="store_true")
+    sb.add_argument("-w", "--wordlist", default="")
+    sb.add_argument("-o", "--output", default="")
 
     # analyze
     ap = sub.add_parser("analyze")
@@ -53,6 +87,21 @@ def build_parser():
     ma.add_argument("memory_dump")
     ma.add_argument("--profile", default="")
     ma.add_argument("-n", "--case", default="")
+    ia = asub.add_parser("ioc", aliases=["iocs"])
+    ia.add_argument("source", help="File path or inline text")
+    ia.add_argument("-n", "--case", default="")
+    ia.add_argument("--type", choices=["auto", "file", "text"], default="auto")
+    ia.add_argument("--no-hash", action="store_true")
+    ia.add_argument("-o", "--output", default="")
+
+    # workflow
+    wp = sub.add_parser("workflow")
+    ws = wp.add_subparsers(dest="workflow_action", required=True)
+    wr = ws.add_parser("run")
+    wr.add_argument("file", help="Path to workflow JSON file")
+    wr.add_argument("-v", "--verbose", action="store_true")
+    we = ws.add_parser("example")
+    we.add_argument("name", choices=["web", "ctf", "malware", "recon"])
 
     # report
     rp = sub.add_parser("report")
@@ -85,30 +134,58 @@ def cmd_case(args, cm):
         cm.delete_case(args.name)
 
 
+def _save_result(result, out_path, cm, case_name, ev_type, summary):
+    """Common helper: save result to file + attach to case if given."""
+    if out_path:
+        with open(out_path, "w") as f:
+            json.dump(result, f, indent=2, default=str)
+        cprint(f"[+] Results saved to {out_path}", "gray")
+    if case_name:
+        cm.add_evidence(case_name, {
+            "type": ev_type, "summary": summary,
+            "file_path": out_path or "",
+        })
+        cprint(f"[+] Attached to case '{case_name}'", "green")
+
+
 def cmd_scan(args, cm, config):
     s = NmapScanner(nmap_binary=config.get("nmap_binary"), verbose=args.verbose)
     r = s.scan(args.target, ports=args.ports, args=args.args, sudo=args.sudo, timeout=args.timeout)
-    cprint(f"\n[+] Scan complete: {s.summarize(r)}", "green")
-    out = args.output
-    if not out and args.case:
-        out = str(cm.evidence_dir(args.case) / f"nmap_{args.target.replace('/', '_')}.json")
-    if out:
-        with open(out, "w") as f:
-            json.dump(r, f, indent=2, default=str)
-        cprint(f"[+] Results saved to {out}", "gray")
-    if args.case:
-        cm.add_evidence(
-            args.case,
-            {
-                "type": "nmap_scan",
-                "source": args.target,
-                "summary": s.summarize(r),
-                "file_path": out or "",
-            },
-        )
-        cprint(f"[+] Attached to case '{args.case}'", "green")
-    else:
-        print(json.dumps(r, indent=2, default=str))
+    cprint(f"\n[+] {s.summarize(r)}", "green")
+    _save_result(r, args.output, cm, args.case, "nmap_scan", s.summarize(r))
+
+
+def cmd_portscan(args, cm):
+    s = PortScanner(timeout=args.timeout, verbose=args.verbose)
+    r = s.scan(args.target, ports=args.ports, threads=args.threads, banner_grab=args.banner)
+    cprint(f"\n[+] {s.summarize(r)}", "green")
+    _save_result(r, args.output, cm, args.case, "portscan", s.summarize(r))
+
+
+def cmd_http(args, cm):
+    s = HttpScanner(verbose=args.verbose)
+    r = s.scan(args.target)
+    cprint(f"\n[+] {s.summarize(r)}", "green")
+    if "hosts" in r and r["hosts"]:
+        http = r["hosts"][0].get("http", {})
+        if http.get("missing_headers"):
+            cprint(f"  [!] Missing security headers: {', '.join(http['missing_headers'])}", "yellow")
+        if http.get("waf"):
+            cprint(f"  [*] WAF detected: {http['waf']}", "cyan")
+        if http.get("technologies"):
+            cprint(f"  [*] Technologies: {', '.join(http['technologies'])}", "cyan")
+    _save_result(r, args.output, cm, args.case, "http_scan", s.summarize(r))
+
+
+def cmd_subdomain(args, cm):
+    s = SubdomainEnumerator(verbose=args.verbose)
+    r = s.scan(
+        args.target, threads=args.threads,
+        use_crtsh=not args.no_crtsh,
+        wordlist=open(args.wordlist).read().splitlines() if args.wordlist else None,
+    )
+    cprint(f"\n[+] {s.summarize(r)}", "green")
+    _save_result(r, args.output, cm, args.case, "subdomain_enum", s.summarize(r))
 
 
 def cmd_analyze(args, cm):
@@ -118,39 +195,71 @@ def cmd_analyze(args, cm):
             cprint("[!] Install: sudo apt install tshark", "red")
             return
         r = a.analyze(args.pcap_path)
-        if args.case:
-            cm.evidence_dir(args.case)
-            cm.add_evidence(
-                args.case,
-                {
-                    "type": "pcap_analysis",
-                    "source": args.pcap_path,
-                    "summary": a.summarize(r),
-                },
-            )
-            cprint(f"[+] PCAP analysis attached to '{args.case}'", "green")
-        else:
-            cprint(f"[+] {a.summarize(r)}", "green")
-            print(json.dumps(r, indent=2, default=str)[:2000])
+        cprint(f"\n[+] {a.summarize(r)}", "green")
+        cm.evidence_dir(args.case) if args.case else None
+        _save_result(r, "", cm, args.case, "pcap_analysis", a.summarize(r))
     elif args.analyze_type in ("memory", "mem"):
         a = VolatilityAnalyzer()
         if not a.available:
             cprint("[!] Install: pip install volatility3", "red")
             return
         r = a.analyze(args.memory_dump, profile=args.profile)
-        if args.case:
-            cm.add_evidence(
-                args.case,
-                {
-                    "type": "memory_analysis",
-                    "source": args.memory_dump,
-                    "summary": a.summarize(r),
-                },
-            )
-            cprint(f"[+] Memory analysis attached to '{args.case}'", "green")
-        else:
-            cprint(f"[+] {a.summarize(r)}", "green")
-            print(json.dumps(r, indent=2, default=str)[:2000])
+        cprint(f"\n[+] {a.summarize(r)}", "green")
+        _save_result(r, "", cm, args.case, "memory_analysis", a.summarize(r))
+    elif args.analyze_type in ("ioc", "iocs"):
+        h = IOCHarvester(verbose=args.verbose)
+        r = h.extract(args.source, source_type=args.type, compute_file_hashes=not args.no_hash)
+        cprint(f"\n[+] {h.summarize(r)}", "green")
+        s = r.get("stats", {})
+        if s.get("urls"):
+            cprint(f"  URLs: {', '.join(r['urls'][:5])}{'...' if len(r['urls'])>5 else ''}", "gray")
+        if s.get("ipv4"):
+            cprint(f"  IPs: {', '.join(r['ipv4'][:5])}{'...' if len(r['ipv4'])>5 else ''}", "gray")
+        if s.get("emails"):
+            cprint(f"  Emails: {', '.join(r['emails'][:5])}", "gray")
+        if s.get("cves"):
+            cprint(f"  CVEs: {', '.join(r['cves'])}", "yellow")
+        _save_result(r, args.output, cm, args.case, "ioc_extraction", h.summarize(r))
+
+
+def cmd_workflow(args, cm):
+    if args.workflow_action == "run":
+        try:
+            wf = Workflow.load(args.file)
+        except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
+            cprint(f"[!] Failed to load workflow: {e}", "red")
+            return
+        runner = WorkflowRunner(wf, case_manager=cm, verbose=args.verbose)
+        runner.run()
+    elif args.workflow_action == "example":
+        wf = _build_example_workflow(args.name)
+        out = f"/tmp/{args.name}_workflow.json"
+        wf.save(out)
+        cprint(f"  Edit and run: investigator workflow run {out}", "gray")
+
+
+def _build_example_workflow(name):
+    """Pre-built workflow templates for common scenarios."""
+    if name == "web":
+        return (Workflow("web_recon", "Web application reconnaissance pipeline")
+                .add("subdomain", "subdomain", {"target": "TARGET"})
+                .add("http", "http", {"target": "https://TARGET"})
+                .add("nmap", "nmap", {"target": "TARGET", "ports": "80,443,8080,8443", "args": "-sV -sC -T4"})
+                .add("ioc", "ioc", {"source": "/var/log/apache2/access.log"}))
+    if name == "ctf":
+        return (Workflow("ctf_box", "CTF box initial enumeration")
+                .add("portscan", "portscan", {"target": "TARGET", "ports": "1-65535", "threads": 200, "banner": True})
+                .add("nmap", "nmap", {"target": "TARGET", "args": "-sV -sC -A -T4 -p-"}))
+    if name == "malware":
+        return (Workflow("malware_triage", "Malware sample triage")
+                .add("ioc", "ioc", {"source": "TARGET"})
+                .add("memory", "memory", {"memory_dump": "TARGET"}))
+    if name == "recon":
+        return (Workflow("full_recon", "Full external recon")
+                .add("subdomain", "subdomain", {"target": "TARGET"})
+                .add("nmap", "nmap", {"target": "TARGET", "args": "-sn"})
+                .add("http", "http", {"target": "https://TARGET"}))
+    return Workflow(name)
 
 
 def cmd_report(args, cm):
@@ -158,7 +267,7 @@ def cmd_report(args, cm):
     if not case:
         cprint(f"[!] Case '{args.case}' not found", "red")
         return
-    out = args.output or f"{case.name.replace(' ', '_')}_report.{args.format}"
+    out = args.output or f"{case.name.replace(' ', '_')}_report.{'txt' if args.format == 'text' else args.format}"
     if args.format == "json":
         ReportGenerator.generate_json(case, output_path=out)
     elif args.format == "html":
@@ -190,11 +299,7 @@ def cmd_evidence(args, cm):
             return
         cm.add_evidence(
             args.case,
-            {
-                "type": args.type,
-                "source": args.file,
-                "summary": f"Added {result['stored_name']}",
-            },
+            {"type": args.type, "source": args.file, "summary": f"Added {result['stored_name']}"},
         )
         cprint("[+] Evidence added", "green")
 
@@ -204,13 +309,31 @@ def main():
     args = parser.parse_args()
     config = Config()
     cm = CaseManager(config)
+
+    if args.command == "dashboard":
+        from .dashboard import run_dashboard
+        try:
+            run_dashboard()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            cprint("[!] Dashboard closed", "yellow")
+        return
+
     try:
         if args.command == "case":
             cmd_case(args, cm)
         elif args.command == "scan":
             cmd_scan(args, cm, config)
+        elif args.command == "portscan":
+            cmd_portscan(args, cm)
+        elif args.command == "http":
+            cmd_http(args, cm)
+        elif args.command == "subdomain":
+            cmd_subdomain(args, cm)
         elif args.command == "analyze":
             cmd_analyze(args, cm)
+        elif args.command == "workflow":
+            cmd_workflow(args, cm)
         elif args.command == "report":
             cmd_report(args, cm)
         elif args.command == "evidence":
@@ -228,4 +351,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
